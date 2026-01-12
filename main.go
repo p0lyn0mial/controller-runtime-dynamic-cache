@@ -158,7 +158,6 @@ func watchFromExactResourceID(mapper meta.RESTMapper, scheme *runtime.Scheme, de
 	if err != nil {
 		return schema.GroupVersionKind{}, nil, err
 	}
-	obj.GetObjectKind().SetGroupVersionKind(gvk)
 
 	cobj, ok := obj.(client.Object)
 	if !ok {
