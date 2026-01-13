@@ -152,9 +152,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	events := make(chan event.GenericEvent, 1024)
+	dispatcher := newEventDispatcher(1024)
 	syncedCh := make(chan struct{})
-	channelSource := source.Channel(events, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+	channelSource := source.Channel(dispatcher.events, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
 		operatorName := operatorNameFromResource(obj)
 		gvk, err := apiutil.GVKForObject(obj, scheme)
 		if err != nil {
@@ -170,6 +170,7 @@ func main() {
 
 	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
 		time.Sleep(5 * time.Second)
+		reconciler.Log.Info("syncing the input resources")
 		for _, def := range inputResources {
 			def := def
 			_, obj, err := watchFromExactResourceID(mgr.GetRESTMapper(), scheme, def)
@@ -182,13 +183,13 @@ func main() {
 			}
 			_, err = informer.AddEventHandler(toolscache.ResourceEventHandlerFuncs{
 				AddFunc: func(obj interface{}) {
-					enqueueIfMatch(def, obj, events)
+					dispatcher.Handle(def, obj)
 				},
 				UpdateFunc: func(_, newObj interface{}) {
-					enqueueIfMatch(def, newObj, events)
+					dispatcher.Handle(def, newObj)
 				},
 				DeleteFunc: func(obj interface{}) {
-					enqueueIfMatch(def, obj, events)
+					dispatcher.Handle(def, obj)
 				},
 			})
 			if err != nil {
@@ -242,7 +243,15 @@ func (s *syncingChannelSource) WaitForSync(ctx context.Context) error {
 	}
 }
 
-func enqueueIfMatch(def libraryinputresources.ExactResourceID, obj interface{}, events chan<- event.GenericEvent) {
+type eventDispatcher struct {
+	events chan event.GenericEvent
+}
+
+func newEventDispatcher(bufferSize int) *eventDispatcher {
+	return &eventDispatcher{events: make(chan event.GenericEvent, bufferSize)}
+}
+
+func (d *eventDispatcher) Handle(def libraryinputresources.ExactResourceID, obj interface{}) {
 	cobj, ok := clientObjectFromEvent(obj)
 	if !ok {
 		return
@@ -253,7 +262,7 @@ func enqueueIfMatch(def libraryinputresources.ExactResourceID, obj interface{}, 
 	if def.Name != "" && cobj.GetName() != def.Name {
 		return
 	}
-	events <- event.GenericEvent{Object: cobj}
+	d.events <- event.GenericEvent{Object: cobj}
 }
 
 func clientObjectFromEvent(obj interface{}) (client.Object, bool) {
