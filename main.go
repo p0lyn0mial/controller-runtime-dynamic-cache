@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-logr/zapr"
 	"go.uber.org/zap"
@@ -21,14 +22,18 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	toolscache "k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 )
@@ -147,44 +152,60 @@ func main() {
 		os.Exit(1)
 	}
 
-	for _, def := range inputResources {
-		def := def
-		_, obj, err := watchFromExactResourceID(mgr.GetRESTMapper(), scheme, def)
+	events := make(chan event.GenericEvent, 1024)
+	syncedCh := make(chan struct{})
+	channelSource := source.Channel(events, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+		operatorName := operatorNameFromResource(obj)
+		gvk, err := apiutil.GVKForObject(obj, scheme)
 		if err != nil {
-			os.Exit(1)
+			gvk = obj.GetObjectKind().GroupVersionKind()
 		}
-		var preds []predicate.Predicate
-		if def.Namespace != "" || def.Name != "" {
-			preds = append(preds, predicate.NewPredicateFuncs(func(obj client.Object) bool {
-				if def.Namespace != "" && obj.GetNamespace() != def.Namespace {
-					return false
-				}
-				if def.Name != "" && obj.GetName() != def.Name {
-					return false
-				}
-				return true
-			}))
+		_ = gvk
+		//fmt.Printf("enqueue operator=%s from %s %s/%s\n", operatorName, gvk.String(), obj.GetNamespace(), obj.GetName())
+		return []reconcile.Request{requestForOperator(operatorName, obj)}
+	}))
+	if err := c.Watch(&syncingChannelSource{source: channelSource, synced: syncedCh}); err != nil {
+		os.Exit(1)
+	}
+
+	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		time.Sleep(5 * time.Second)
+		for _, def := range inputResources {
+			def := def
+			_, obj, err := watchFromExactResourceID(mgr.GetRESTMapper(), scheme, def)
+			if err != nil {
+				return err
+			}
+			informer, err := mgr.GetCache().GetInformer(ctx, obj, cache.BlockUntilSynced(true))
+			if err != nil {
+				return err
+			}
+			_, err = informer.AddEventHandler(toolscache.ResourceEventHandlerFuncs{
+				AddFunc: func(obj interface{}) {
+					enqueueIfMatch(def, obj, events)
+				},
+				UpdateFunc: func(_, newObj interface{}) {
+					enqueueIfMatch(def, newObj, events)
+				},
+				DeleteFunc: func(obj interface{}) {
+					enqueueIfMatch(def, obj, events)
+				},
+			})
+			if err != nil {
+				return err
+			}
 		}
-		informer, err := mgr.GetCache().GetInformer(context.Background(), obj)
-		if err != nil {
-			os.Exit(1)
+		if !mgr.GetCache().WaitForCacheSync(ctx) {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return fmt.Errorf("cache did not sync")
 		}
-		if err := c.Watch(&source.Informer{
-			Informer: informer,
-			Handler: handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-				operatorName := operatorNameFromResource(obj)
-				gvk, err := apiutil.GVKForObject(obj, scheme)
-				if err != nil {
-					gvk = obj.GetObjectKind().GroupVersionKind()
-				}
-				_ = gvk
-				//fmt.Printf("enqueue operator=%s from %s %s/%s\n", operatorName, gvk.String(), obj.GetNamespace(), obj.GetName())
-				return []reconcile.Request{requestForOperator(operatorName, obj)}
-			}),
-			Predicates: preds,
-		}); err != nil {
-			os.Exit(1)
-		}
+		close(syncedCh)
+		<-ctx.Done()
+		return nil
+	})); err != nil {
+		os.Exit(1)
 	}
 
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
@@ -199,6 +220,52 @@ func requestForOperator(operatorName string, obj client.Object) reconcile.Reques
 
 func operatorNameFromResource(obj client.Object) string {
 	return "example-operator"
+}
+
+type syncingChannelSource struct {
+	source source.Source
+	synced <-chan struct{}
+}
+
+var _ source.SyncingSource = (*syncingChannelSource)(nil)
+
+func (s *syncingChannelSource) Start(ctx context.Context, queue workqueue.TypedRateLimitingInterface[reconcile.Request]) error {
+	return s.source.Start(ctx, queue)
+}
+
+func (s *syncingChannelSource) WaitForSync(ctx context.Context) error {
+	select {
+	case <-s.synced:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func enqueueIfMatch(def libraryinputresources.ExactResourceID, obj interface{}, events chan<- event.GenericEvent) {
+	cobj, ok := clientObjectFromEvent(obj)
+	if !ok {
+		return
+	}
+	if def.Namespace != "" && cobj.GetNamespace() != def.Namespace {
+		return
+	}
+	if def.Name != "" && cobj.GetName() != def.Name {
+		return
+	}
+	events <- event.GenericEvent{Object: cobj}
+}
+
+func clientObjectFromEvent(obj interface{}) (client.Object, bool) {
+	if cobj, ok := obj.(client.Object); ok {
+		return cobj, true
+	}
+	tombstone, ok := obj.(toolscache.DeletedFinalStateUnknown)
+	if !ok {
+		return nil, false
+	}
+	cobj, ok := tombstone.Obj.(client.Object)
+	return cobj, ok
 }
 
 func watchFromExactResourceID(mapper meta.RESTMapper, scheme *runtime.Scheme, def libraryinputresources.ExactResourceID) (schema.GroupVersionKind, client.Object, error) {
