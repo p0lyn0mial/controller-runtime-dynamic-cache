@@ -153,9 +153,9 @@ func main() {
 		if err != nil {
 			os.Exit(1)
 		}
-		var preds []predicate.TypedPredicate[client.Object]
+		var preds []predicate.Predicate
 		if def.Namespace != "" || def.Name != "" {
-			preds = append(preds, predicate.NewTypedPredicateFuncs(func(obj client.Object) bool {
+			preds = append(preds, predicate.NewPredicateFuncs(func(obj client.Object) bool {
 				if def.Namespace != "" && obj.GetNamespace() != def.Namespace {
 					return false
 				}
@@ -165,10 +165,13 @@ func main() {
 				return true
 			}))
 		}
-		if err := c.Watch(source.Kind(
-			mgr.GetCache(),
-			obj,
-			handler.TypedEnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+		informer, err := mgr.GetCache().GetInformer(context.Background(), obj)
+		if err != nil {
+			os.Exit(1)
+		}
+		if err := c.Watch(&source.Informer{
+			Informer: informer,
+			Handler: handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
 				operatorName := operatorNameFromResource(obj)
 				gvk, err := apiutil.GVKForObject(obj, scheme)
 				if err != nil {
@@ -178,8 +181,8 @@ func main() {
 				//fmt.Printf("enqueue operator=%s from %s %s/%s\n", operatorName, gvk.String(), obj.GetNamespace(), obj.GetName())
 				return []reconcile.Request{requestForOperator(operatorName, obj)}
 			}),
-			preds...,
-		)); err != nil {
+			Predicates: preds,
+		}); err != nil {
 			os.Exit(1)
 		}
 	}
