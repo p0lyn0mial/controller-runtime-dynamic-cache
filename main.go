@@ -9,7 +9,9 @@ import (
 	"github.com/go-logr/logr"
 	libraryinputresources "github.com/openshift/multi-operator-manager/pkg/library/libraryinputresources"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/klog/v2"
@@ -25,7 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
-var watchDefs = []libraryinputresources.ExactResourceID{
+var inputResources = []libraryinputresources.ExactResourceID{
 	{
 		InputResourceTypeIdentifier: libraryinputresources.InputResourceTypeIdentifier{
 			Group:    "",
@@ -50,17 +52,55 @@ var watchDefs = []libraryinputresources.ExactResourceID{
 			Version:  "v1",
 			Resource: "nodes",
 		},
+		Name: "kind-control-plane",
 	},
 }
 
 type DynamicReconciler struct {
 	client.Client
-	Log logr.Logger
+	Log    logr.Logger
+	Mapper meta.RESTMapper
 }
 
 func (r *DynamicReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := r.Log.WithValues("operator", req.Name)
 	log.Info("observed operator")
+	if r.Mapper == nil {
+		return ctrl.Result{}, fmt.Errorf("restmapper is not configured")
+	}
+
+	for _, def := range inputResources {
+		id := def.InputResourceTypeIdentifier
+		if def.Name == "" {
+			log.Info("skipping resource without name", "group", id.Group, "version", id.Version, "resource", id.Resource)
+			continue
+		}
+
+		gvr := schema.GroupVersionResource{Group: id.Group, Version: id.Version, Resource: id.Resource}
+		gvk, err := r.Mapper.KindFor(gvr)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		obj := &unstructured.Unstructured{}
+		obj.SetGroupVersionKind(gvk)
+		key := client.ObjectKey{Namespace: def.Namespace, Name: def.Name}
+		if err := r.Get(ctx, key, obj); err != nil {
+			if apierrors.IsNotFound(err) {
+				log.Info("resource not found", "gvk", gvk.String(), "name", key)
+				continue
+			}
+			return ctrl.Result{}, err
+		}
+
+		log.Info(
+			"resource from cache",
+			"gvk", gvk.String(),
+			"name", key,
+			"uid", obj.GetUID(),
+			"resourceVersion", obj.GetResourceVersion(),
+		)
+	}
 	return ctrl.Result{}, nil
 }
 
@@ -89,6 +129,7 @@ func main() {
 	reconciler := &DynamicReconciler{
 		Client: mgr.GetClient(),
 		Log:    ctrl.Log.WithName("dynamic-unstructured"),
+		Mapper: mgr.GetRESTMapper(),
 	}
 
 	c, err := controller.New("dynamic-unstructured", mgr, controller.Options{Reconciler: reconciler})
@@ -96,7 +137,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	for _, def := range watchDefs {
+	for _, def := range inputResources {
 		def := def
 		_, obj, err := watchFromExactResourceID(mgr.GetRESTMapper(), scheme, def)
 		if err != nil {
@@ -123,7 +164,8 @@ func main() {
 				if err != nil {
 					gvk = obj.GetObjectKind().GroupVersionKind()
 				}
-				fmt.Printf("enqueue operator=%s from %s %s/%s\n", operatorName, gvk.String(), obj.GetNamespace(), obj.GetName())
+				_ = gvk
+				//fmt.Printf("enqueue operator=%s from %s %s/%s\n", operatorName, gvk.String(), obj.GetNamespace(), obj.GetName())
 				return []reconcile.Request{requestForOperator(operatorName, obj)}
 			}),
 			preds...,
