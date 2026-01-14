@@ -76,10 +76,10 @@ func main() {
 	}
 
 	reconciler := &DynamicReconciler{
-		Client: mgr.GetClient(),
 		Log:    ctrl.Log.WithName("dynamic-unstructured"),
 		Mapper: mgr.GetRESTMapper(),
 		Scheme: scheme,
+		Cache:  mgr.GetCache(),
 	}
 
 	if err := reconciler.SetupWithManager(mgr); err != nil {
