@@ -8,6 +8,7 @@ import (
 	libraryinputresources "github.com/openshift/multi-operator-manager/pkg/library/libraryinputresources"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/sets"
 	toolscache "k8s.io/client-go/tools/cache"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -39,6 +40,8 @@ func (r *inputResourceInitializer) Start(ctx context.Context) error {
 	if err = r.checkSupportedInputResources(inputResources); err != nil {
 		return err
 	}
+	visited := sets.NewString()
+
 	for _, resources := range inputResources {
 		for _, def := range resources {
 			id := def.InputResourceTypeIdentifier
@@ -47,6 +50,12 @@ func (r *inputResourceInitializer) Start(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
+			gvkStr := gvk.String()
+			if visited.Has(gvkStr) {
+				ctrl.Log.WithName("dynamic-unstructured").Info("gvk already registered", "gvk", gvkStr)
+				continue
+			}
+
 			informer, err := r.managementClusterCache.GetInformerForKind(ctx, gvk, cache.BlockUntilSynced(true))
 			if err != nil {
 				return err
@@ -65,6 +74,7 @@ func (r *inputResourceInitializer) Start(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
+			visited.Insert(gvkStr)
 		}
 	}
 	if !r.managementClusterCache.WaitForCacheSync(ctx) {
@@ -88,6 +98,15 @@ func (r *inputResourceInitializer) discoverInputResources() (map[string][]librar
 				},
 				Namespace: "kube-system",
 				Name:      "kube-root-ca.crt",
+			},
+			{
+				InputResourceTypeIdentifier: libraryinputresources.InputResourceTypeIdentifier{
+					Group:    "",
+					Version:  "v1",
+					Resource: "configmaps",
+				},
+				Namespace: "kube-system",
+				Name:      "kubeadm-config",
 			},
 			{
 				InputResourceTypeIdentifier: libraryinputresources.InputResourceTypeIdentifier{
