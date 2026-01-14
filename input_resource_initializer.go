@@ -40,18 +40,20 @@ func (r *inputResourceInitializer) Start(ctx context.Context) error {
 	if err = r.checkSupportedInputResources(inputResources); err != nil {
 		return err
 	}
-	visited := sets.NewString()
-
-	for _, resources := range inputResources {
-		for _, def := range resources {
-			id := def.InputResourceTypeIdentifier
-			gvr := schema.GroupVersionResource{Group: id.Group, Version: id.Version, Resource: id.Resource}
+	for operator, resources := range inputResources {
+		registeredGVK := sets.NewString()
+		for _, exactResource := range resources.ApplyConfigurationResources.ExactResources {
+			gvr := schema.GroupVersionResource{
+				Group:    exactResource.Group,
+				Version:  exactResource.Version,
+				Resource: exactResource.Resource,
+			}
 			gvk, err := r.managementClusterRESTMapper.KindFor(gvr)
 			if err != nil {
-				return err
+				return fmt.Errorf("unable to find Kind for %#v, for %s operator, err: %w", exactResource, operator, err)
 			}
 			gvkStr := gvk.String()
-			if visited.Has(gvkStr) {
+			if registeredGVK.Has(gvkStr) {
 				ctrl.Log.WithName("dynamic-unstructured").Info("gvk already registered", "gvk", gvkStr)
 				continue
 			}
@@ -62,73 +64,77 @@ func (r *inputResourceInitializer) Start(ctx context.Context) error {
 			}
 			_, err = informer.AddEventHandler(toolscache.ResourceEventHandlerFuncs{
 				AddFunc: func(obj interface{}) {
-					r.dispatcher.Handle(def, obj)
+					r.dispatcher.Handle(exactResource, obj)
 				},
 				UpdateFunc: func(_, newObj interface{}) {
-					r.dispatcher.Handle(def, newObj)
+					r.dispatcher.Handle(exactResource, newObj)
 				},
 				DeleteFunc: func(obj interface{}) {
-					r.dispatcher.Handle(def, obj)
+					r.dispatcher.Handle(exactResource, obj)
 				},
 			})
 			if err != nil {
 				return err
 			}
-			visited.Insert(gvkStr)
+			registeredGVK.Insert(gvkStr)
 		}
 	}
 	if !r.managementClusterCache.WaitForCacheSync(ctx) {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return fmt.Errorf("cache did not sync")
+		return fmt.Errorf("caches did not sync")
 	}
 	close(r.syncedCh)
 	return nil
 }
 
-func (r *inputResourceInitializer) discoverInputResources() (map[string][]libraryinputresources.ExactResourceID, error) {
-	return map[string][]libraryinputresources.ExactResourceID{
-		"default": {
-			{
-				InputResourceTypeIdentifier: libraryinputresources.InputResourceTypeIdentifier{
-					Group:    "",
-					Version:  "v1",
-					Resource: "configmaps",
+func (r *inputResourceInitializer) discoverInputResources() (map[string]*libraryinputresources.InputResources, error) {
+	return map[string]*libraryinputresources.InputResources{
+		"cluster-authentication-operator": {
+			ApplyConfigurationResources: libraryinputresources.ResourceList{
+				ExactResources: []libraryinputresources.ExactResourceID{
+					{
+						InputResourceTypeIdentifier: libraryinputresources.InputResourceTypeIdentifier{
+							Group:    "",
+							Version:  "v1",
+							Resource: "configmaps",
+						},
+						Namespace: "kube-system",
+						Name:      "kube-root-ca.crt",
+					},
+					{
+						InputResourceTypeIdentifier: libraryinputresources.InputResourceTypeIdentifier{
+							Group:    "",
+							Version:  "v1",
+							Resource: "configmaps",
+						},
+						Namespace: "kube-system",
+						Name:      "kubeadm-config",
+					},
+					{
+						InputResourceTypeIdentifier: libraryinputresources.InputResourceTypeIdentifier{
+							Group:    "",
+							Version:  "v1",
+							Resource: "secrets",
+						},
+						Namespace: "kube-system",
+						Name:      "bootstrap-token-abcdef",
+					},
+					{
+						InputResourceTypeIdentifier: libraryinputresources.InputResourceTypeIdentifier{
+							Group:    "",
+							Version:  "v1",
+							Resource: "nodes",
+						},
+						Name: "kind-control-plane",
+					},
 				},
-				Namespace: "kube-system",
-				Name:      "kube-root-ca.crt",
-			},
-			{
-				InputResourceTypeIdentifier: libraryinputresources.InputResourceTypeIdentifier{
-					Group:    "",
-					Version:  "v1",
-					Resource: "configmaps",
-				},
-				Namespace: "kube-system",
-				Name:      "kubeadm-config",
-			},
-			{
-				InputResourceTypeIdentifier: libraryinputresources.InputResourceTypeIdentifier{
-					Group:    "",
-					Version:  "v1",
-					Resource: "secrets",
-				},
-				Namespace: "kube-system",
-				Name:      "bootstrap-token-abcdef",
-			},
-			{
-				InputResourceTypeIdentifier: libraryinputresources.InputResourceTypeIdentifier{
-					Group:    "",
-					Version:  "v1",
-					Resource: "nodes",
-				},
-				Name: "kind-control-plane",
 			},
 		},
 	}, nil
 }
 
-func (r *inputResourceInitializer) checkSupportedInputResources(_ map[string][]libraryinputresources.ExactResourceID) error {
+func (r *inputResourceInitializer) checkSupportedInputResources(_ map[string]*libraryinputresources.InputResources) error {
 	return nil
 }

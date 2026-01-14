@@ -52,14 +52,13 @@ func (r *DynamicReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	for _, resources := range inputResources {
-		for _, def := range resources {
-			id := def.InputResourceTypeIdentifier
+		for _, def := range resources.ApplyConfigurationResources.ExactResources {
 			if def.Name == "" {
-				log.Info("skipping resource without name", "group", id.Group, "version", id.Version, "resource", id.Resource)
+				log.Info("skipping resource without name", "group", def.Group, "version", def.Version, "resource", def.Resource)
 				continue
 			}
 
-			gvr := schema.GroupVersionResource{Group: id.Group, Version: id.Version, Resource: id.Resource}
+			gvr := schema.GroupVersionResource{Group: def.Group, Version: def.Version, Resource: def.Resource}
 			gvk, err := r.Mapper.KindFor(gvr)
 			if err != nil {
 				return ctrl.Result{}, err
