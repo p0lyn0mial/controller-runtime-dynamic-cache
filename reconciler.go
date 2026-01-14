@@ -24,17 +24,24 @@ import (
 )
 
 type DynamicReconciler struct {
-	client.Client
 	Log    logr.Logger
 	Mapper meta.RESTMapper
 	Scheme *runtime.Scheme
+	Cache  cache.Cache
 }
 
 func (r *DynamicReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	time.Sleep(time.Second)
 	log := r.Log.WithValues("operator", req.Name)
 	log.Info("observed operator")
 	if r.Mapper == nil {
 		return ctrl.Result{}, fmt.Errorf("restmapper is not configured")
+	}
+	if r.Cache == nil {
+		return ctrl.Result{}, fmt.Errorf("cache is not configured")
+	}
+	if r.Scheme == nil {
+		return ctrl.Result{}, fmt.Errorf("scheme is not configured")
 	}
 
 	for _, def := range inputResources {
@@ -50,16 +57,29 @@ func (r *DynamicReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			return ctrl.Result{}, err
 		}
 
-		obj := &unstructured.Unstructured{}
-		obj.SetGroupVersionKind(gvk)
+		typedObj, err := r.Scheme.New(gvk)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		typedClientObj, ok := typedObj.(client.Object)
+		if !ok {
+			return ctrl.Result{}, fmt.Errorf("type %T does not implement client.Object", typedObj)
+		}
 		key := client.ObjectKey{Namespace: def.Namespace, Name: def.Name}
-		if err := r.Get(ctx, key, obj); err != nil {
+		if err := r.Cache.Get(ctx, key, typedClientObj); err != nil {
 			if apierrors.IsNotFound(err) {
 				log.Info("resource not found", "gvk", gvk.String(), "name", key)
 				continue
 			}
 			return ctrl.Result{}, err
 		}
+
+		unstructuredMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(typedObj)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		obj := &unstructured.Unstructured{Object: unstructuredMap}
+		obj.SetGroupVersionKind(gvk)
 
 		log.Info(
 			"resource from cache",
