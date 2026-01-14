@@ -12,42 +12,12 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
-	libraryinputresources "github.com/openshift/multi-operator-manager/pkg/library/libraryinputresources"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
-
-var inputResources = []libraryinputresources.ExactResourceID{
-	{
-		InputResourceTypeIdentifier: libraryinputresources.InputResourceTypeIdentifier{
-			Group:    "",
-			Version:  "v1",
-			Resource: "configmaps",
-		},
-		Namespace: "kube-system",
-		Name:      "kube-root-ca.crt",
-	},
-	{
-		InputResourceTypeIdentifier: libraryinputresources.InputResourceTypeIdentifier{
-			Group:    "",
-			Version:  "v1",
-			Resource: "secrets",
-		},
-		Namespace: "kube-system",
-		Name:      "bootstrap-token-abcdef",
-	},
-	{
-		InputResourceTypeIdentifier: libraryinputresources.InputResourceTypeIdentifier{
-			Group:    "",
-			Version:  "v1",
-			Resource: "nodes",
-		},
-		Name: "kind-control-plane",
-	},
-}
 
 func main() {
 	config, err := parseConfiguration(flag.CommandLine, os.Args[1:])
@@ -80,6 +50,14 @@ func main() {
 		Mapper: mgr.GetRESTMapper(),
 		Scheme: scheme,
 		Cache:  mgr.GetCache(),
+	}
+
+	dispatcher := newEventDispatcher(1024)
+	inputResourcesInit := newInputResourceInitializer(mgr.GetRESTMapper(), mgr.GetCache(), dispatcher)
+	reconciler.InputResourcesInit = inputResourcesInit
+
+	if err := mgr.Add(inputResourcesInit); err != nil {
+		os.Exit(1)
 	}
 
 	if err := reconciler.SetupWithManager(mgr); err != nil {
