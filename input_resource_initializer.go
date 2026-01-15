@@ -31,8 +31,6 @@ func newInputResourceInitializer(mgmtClusterRESTMapper meta.RESTMapper, mgmtClus
 }
 
 func (r *inputResourceInitializer) Start(ctx context.Context) error {
-	ctrl.Log.WithName("dynamic-unstructured").Info("syncing the input resources")
-	time.Sleep(5 * time.Second)
 	inputResources, err := r.discoverInputResources()
 	if err != nil {
 		return err
@@ -40,6 +38,12 @@ func (r *inputResourceInitializer) Start(ctx context.Context) error {
 	if err = r.checkSupportedInputResources(inputResources); err != nil {
 		return err
 	}
+	return r.startAndWaitForInformersFor(ctx, inputResources)
+}
+
+func (r *inputResourceInitializer) startAndWaitForInformersFor(ctx context.Context, inputResources map[string]*libraryinputresources.InputResources) error {
+	ctrl.Log.WithName("dynamic-unstructured").Info("syncing the input resources")
+	time.Sleep(5 * time.Second)
 	for operator, resources := range inputResources {
 		registeredGVK := sets.NewString()
 		for _, exactResource := range resources.ApplyConfigurationResources.ExactResources {
