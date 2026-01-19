@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 
-	libraryinputresources "github.com/openshift/multi-operator-manager/pkg/library/libraryinputresources"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	toolscache "k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -33,25 +33,44 @@ func (s *syncingChannelSource) WaitForSync(ctx context.Context) error {
 }
 
 type eventDispatcher struct {
-	events chan event.GenericEvent
+	events  chan event.GenericEvent
+	filters map[schema.GroupVersionKind][]eventFilter
 }
 
-func newEventDispatcher(bufferSize int) *eventDispatcher {
-	return &eventDispatcher{events: make(chan event.GenericEvent, bufferSize)}
+func newEventDispatcher(events chan event.GenericEvent, filters map[schema.GroupVersionKind][]eventFilter) *eventDispatcher {
+	return &eventDispatcher{
+		events:  events,
+		filters: copyFilters(filters),
+	}
 }
 
-func (d *eventDispatcher) Handle(def libraryinputresources.ExactResourceID, obj interface{}) {
-	cobj, ok := clientObjectFromEvent(obj)
-	if !ok {
-		return
+type eventFilter func(obj client.Object) bool
+
+func (d *eventDispatcher) Handle(gvk schema.GroupVersionKind, cObj client.Object) {
+	//cobj, ok := clientObjectFromEvent(obj)
+	//if !ok {
+	//	return
+	//}
+	filters := d.filters[gvk]
+	for _, filter := range filters {
+		if filter(cObj) {
+			d.events <- event.GenericEvent{Object: cObj}
+			return
+		}
 	}
-	if def.Namespace != "" && cobj.GetNamespace() != def.Namespace {
-		return
+}
+
+func copyFilters(filters map[schema.GroupVersionKind][]eventFilter) map[schema.GroupVersionKind][]eventFilter {
+	if len(filters) == 0 {
+		return map[schema.GroupVersionKind][]eventFilter{}
 	}
-	if def.Name != "" && cobj.GetName() != def.Name {
-		return
+	copied := make(map[schema.GroupVersionKind][]eventFilter, len(filters))
+	for gvk, list := range filters {
+		filterList := make([]eventFilter, len(list))
+		copy(filterList, list)
+		copied[gvk] = filterList
 	}
-	d.events <- event.GenericEvent{Object: cobj}
+	return copied
 }
 
 func clientObjectFromEvent(obj interface{}) (client.Object, bool) {

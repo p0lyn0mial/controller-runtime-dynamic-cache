@@ -52,8 +52,7 @@ func main() {
 		Cache:  mgr.GetCache(),
 	}
 
-	dispatcher := newEventDispatcher(1024)
-	inputResourcesInit := newInputResourceInitializer(mgr.GetRESTMapper(), mgr.GetCache(), dispatcher)
+	inputResourcesInit := newInputResourceInitializer(mgr.GetRESTMapper(), mgr.GetCache(), 1024)
 	reconciler.InputResourcesInit = inputResourcesInit
 
 	if err := mgr.Add(inputResourcesInit); err != nil {

@@ -46,10 +46,7 @@ func (r *DynamicReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, fmt.Errorf("input resources initializer is not configured")
 	}
 
-	inputResources, err := r.InputResourcesInit.discoverInputResources()
-	if err != nil {
-		return ctrl.Result{}, err
-	}
+	inputResources := r.InputResourcesInit.inputResources
 
 	for _, resources := range inputResources {
 		for _, def := range resources.ApplyConfigurationResources.ExactResources {
@@ -112,9 +109,8 @@ func (r *DynamicReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 
-	dispatcher := r.InputResourcesInit.dispatcher
 	syncedCh := r.InputResourcesInit.syncedCh
-	channelSource := source.Channel(dispatcher.events, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+	channelSource := source.Channel(r.InputResourcesInit.events, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
 		operatorName := operatorNameFromResource(obj)
 		gvk, err := apiutil.GVKForObject(obj, r.Scheme)
 		if err != nil {
